@@ -16,6 +16,8 @@ Dependencies: numpy, pk.models
 import math
 
 import numpy as np
+
+_trapz = getattr(np, 'trapezoid', None) or np.trapz
 from numpy.typing import NDArray
 
 from pk.models import PKParams
@@ -307,7 +309,7 @@ def auc_trapezoidal(
     Returns:
         AUC in mg*h/L
     """
-    return float(np.trapezoid(c, t))
+    return float(_trapz(c, t))
 
 
 def auc24_from_cl(daily_dose: float, cl: float) -> float:

@@ -16,6 +16,9 @@ Dependencies: numpy, scipy, pk.models
 from typing import Callable
 
 import numpy as np
+
+# NumPy compat: trapezoid (>=2.0) vs trapz (<2.0)
+_trapz = getattr(np, 'trapezoid', None) or np.trapz
 from numpy.typing import NDArray
 from scipy.integrate import solve_ivp
 
@@ -40,7 +43,7 @@ class SimulationResult:
     @property
     def auc(self) -> float:
         """Total AUC over entire simulated period (trapezoidal)."""
-        return float(np.trapezoid(self.concentration, self.time))
+        return float(_trapz(self.concentration, self.time))
 
     @property
     def cmax(self) -> float:
@@ -60,7 +63,7 @@ class SimulationResult:
         mask = (self.time >= t_start) & (self.time <= t_end)
         if np.sum(mask) < 2:
             return 0.0
-        return float(np.trapezoid(
+        return float(_trapz(
             self.concentration[mask], self.time[mask]
         ))
 
