@@ -1,0 +1,94 @@
+# ══════════════════════════════════════════════════════════════
+# MIPD Docker Compose — 5 services
+#
+# Thuyết minh CV 6.1:
+#   "Các microservices được đóng gói bằng Docker,
+#    triển khai trên Kubernetes hoặc nền tảng đám mây"
+#
+# Usage:
+#   docker compose up -d          # Start all
+#   docker compose logs -f        # View logs
+#   docker compose down           # Stop all
+# ══════════════════════════════════════════════════════════════
+
+services:
+
+  # ── 1. PK Engine (FastAPI) ─────────────────────────────────
+  pk-engine:
+    build:
+      context: ./src/pk-engine
+      dockerfile: Dockerfile
+    container_name: mipd-pk-engine
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ── 2. API Gateway (ASP.NET Core + YARP) ───────────────────
+  api-gateway:
+    build:
+      context: ./src/backend/MIPD.ApiGateway
+      dockerfile: Dockerfile
+    container_name: mipd-api-gateway
+    ports:
+      - "5000:5000"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:5000
+      - ReverseProxy__Clusters__pk-engine__Destinations__default__Address=http://pk-engine:8000
+      - Redis__ConnectionString=redis:6379
+      - Jwt__Secret=${JWT_SECRET:-MIPD-JWT-Secret-Key-Change-In-Production-2026-VN!}
+      - Jwt__Issuer=MIPD
+      - Jwt__Audience=MIPD-Client
+    depends_on:
+      pk-engine:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  # ── 3. Redis Cache ─────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: mipd-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  # ── 4. MS SQL Server ───────────────────────────────────────
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: mipd-mssql
+    ports:
+      - "1433:1433"
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=${SA_PASSWORD:-MipdAdmin@2026!}
+      - MSSQL_PID=Developer
+    volumes:
+      - mssql-data:/var/opt/mssql
+    restart: unless-stopped
+
+  # ── 5. Frontend (React/Vite) ───────────────────────────────
+  frontend:
+    build:
+      context: ./src/frontend
+      dockerfile: Dockerfile
+    container_name: mipd-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - api-gateway
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  mssql-data:

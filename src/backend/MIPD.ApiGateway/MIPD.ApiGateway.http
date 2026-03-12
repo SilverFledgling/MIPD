@@ -1,0 +1,6 @@
+@MIPD.ApiGateway_HostAddress = http://localhost:5191
+
+GET {{MIPD.ApiGateway_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

@@ -54,3 +54,22 @@ logs/
 
 # JAX/NumPyro cache
 .jax_cache/
+
+# .NET
+bin/
+obj/
+*.user
+.vs/
+*.suo
+
+# Node/React
+node_modules/
+.vite/
+
+# Docker data
+mssql-data/
+redis-data/
+
+# Backups
+benchmarks_backup_*/
+*.bak

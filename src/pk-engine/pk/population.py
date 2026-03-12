@@ -94,11 +94,68 @@ TACROLIMUS_ORAL = PopPKModel(
 
 
 # ──────────────────────────────────────────────────────────────────
+# Vancomycin 1-comp IV — Pediatric (from MCMCcode.R)
+# ──────────────────────────────────────────────────────────────────
+
+def maturation_factor(pma: float, tm50: float = 34.8, hill: float = 4.53) -> float:
+    """
+    Hill sigmoid maturation function for pediatric clearance.
+
+    Models the maturation of renal function/metabolism with age:
+        MF = 1 / (1 + (PMA / TM50)^(-Hill))
+
+    When PMA >> TM50 → MF ≈ 1.0 (adult-like clearance)
+    When PMA << TM50 → MF ≈ 0.0 (immature clearance)
+    When PMA  = TM50 → MF = 0.5 (half-maturation)
+
+    Args:
+        pma:    Post-menstrual age in weeks
+        tm50:   PMA at 50% maturation (default: 34.8 weeks)
+        hill:   Hill coefficient (steepness, default: 4.53)
+
+    Returns:
+        Maturation factor [0, 1]
+
+    Reference:
+        MCMCcode.R (Vancomycin nhi khoa)
+        Anderson & Holford (2008), Annu Rev Pharmacol Toxicol
+    """
+    if pma <= 0:
+        return 0.0
+    ratio = pma / tm50
+    return 1.0 / (1.0 + ratio ** (-hill))
+
+
+VANCOMYCIN_PEDI = PopPKModel(
+    name="Vancomycin Pediatric 1-comp IV",
+    drug="vancomycin",
+    model_type=ModelType.ONE_COMP_PEDI_IV,
+    typical_values=PKParams(
+        CL=0.345,   # L/h (reference: 2.9 kg neonate)
+        V1=1.75,    # L   (reference: 2.9 kg neonate)
+        Q=0.0,      # 1-comp model
+        V2=0.0,     # 1-comp model
+    ),
+    omega_matrix=[
+        [0.0466, 0.000],   # omega^2 for CL (~21% CV)
+        [0.000,  0.0119],  # omega^2 for V  (~11% CV)
+    ],
+    error_model=ErrorModel(
+        sigma_prop=0.205,    # 20.5% proportional
+        sigma_add=1.14,      # sqrt(1.3) ≈ 1.14 mg/L additive
+        model_type=ErrorModelType.COMBINED,
+    ),
+    reference="MCMCcode.R (Vancomycin nhi khoa, adapted from clinical data)",
+)
+
+
+# ──────────────────────────────────────────────────────────────────
 # Model registry
 # ──────────────────────────────────────────────────────────────────
 
 MODEL_REGISTRY: dict[str, PopPKModel] = {
     "vancomycin_vn": VANCOMYCIN_VN,
+    "vancomycin_pedi": VANCOMYCIN_PEDI,
     "tacrolimus_oral": TACROLIMUS_ORAL,
 }
 
@@ -157,6 +214,45 @@ def compute_vancomycin_tv(patient: PatientData) -> PKParams:
     v2_tv = tv.V2 * (wt_ratio ** 1.0)
 
     return PKParams(CL=cl_tv, V1=v1_tv, Q=q_tv, V2=v2_tv)
+
+
+def compute_vancomycin_pedi_tv(patient: PatientData) -> PKParams:
+    """
+    Compute typical PK values for *pediatric* vancomycin using covariate model.
+
+    From MCMCcode.R:
+        CL = TVCL × (WT/2.9)^0.75 × (1/Scr)^0.267 × MF(PMA) / (1 + (PMA/TM50)^(-Hill))
+        V  = TVV  × (WT/2.9)
+
+    Maturation function (Hill sigmoid):
+        MF(PMA) = 1 / (1 + (PMA/34.8)^(-4.53))
+
+    Args:
+        patient: Patient data (must include pma in weeks)
+
+    Returns:
+        PKParams with covariate-adjusted typical values for pediatric patient
+    """
+    tv = VANCOMYCIN_PEDI.typical_values
+    wt = max(0.5, patient.weight)   # kg
+    scr = max(0.1, patient.serum_creatinine)  # mg/dL
+
+    # PMA: postmenstrual age in weeks
+    # If not provided, estimate from age: PMA ≈ 40 + age_years × 52
+    pma = patient.pma if patient.pma is not None else (40 + patient.age * 52)
+
+    # Reference weight for allometric scaling: 2.9 kg (neonatal reference)
+    wt_ref = 2.9
+    wt_ratio = wt / wt_ref
+
+    # Maturation factor
+    mf = maturation_factor(pma, tm50=34.8, hill=4.53)
+
+    # Covariate-adjusted typical values
+    cl_tv = tv.CL * (wt_ratio ** 0.75) * ((1.0 / scr) ** 0.267) * mf
+    v_tv = tv.V1 * (wt / wt_ref)
+
+    return PKParams(CL=cl_tv, V1=v_tv, Q=0.0, V2=0.0)
 
 
 # ──────────────────────────────────────────────────────────────────

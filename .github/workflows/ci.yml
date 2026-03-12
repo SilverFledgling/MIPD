@@ -1,0 +1,74 @@
+# ══════════════════════════════════════════════════════════════
+# MIPD CI/CD — GitHub Actions
+#
+# Triggers: push to main, PR to main
+# Jobs:
+#   1. Build + test PK Engine (Python)
+#   2. Build API Gateway (.NET 8)
+#   3. Build Frontend (Node/Vite)
+#   4. Docker Compose build (optional)
+# ══════════════════════════════════════════════════════════════
+
+name: MIPD CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+
+  # ── 1. PK Engine (Python FastAPI) ──────────────────────────
+  pk-engine:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/pk-engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -c "from api.main import app; print('PK Engine import OK')"
+
+  # ── 2. API Gateway (.NET 8) ────────────────────────────────
+  api-gateway:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/backend/MIPD.ApiGateway
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - run: dotnet restore
+      - run: dotnet build --no-restore -c Release
+
+  # ── 3. Frontend (React/Vite) ───────────────────────────────
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: src/frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+
+  # ── 4. Docker Build (on main push only) ────────────────────
+  docker:
+    runs-on: ubuntu-latest
+    needs: [pk-engine, api-gateway, frontend]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose build

@@ -149,6 +149,53 @@ def bayesian_estimate(req: BayesianRequest) -> BayesianResponse:
                 "n_particles": result.particles.shape[0],
             }
 
+        elif method == "mcmc":
+            from bayesian.mcmc import run_mcmc
+            result = run_mcmc(
+                model, tv, dose_events, observations,
+                n_warmup=500, n_samples=1000, n_chains=2,
+            )
+            ind_params = result.map_params
+            eta = result.posterior_eta.mean(axis=0).tolist()
+            confidence = {}
+            for pk_name, info in result.posterior_params.items():
+                confidence[pk_name] = {
+                    "ci95_lower": info["ci95_lower"],
+                    "ci95_upper": info["ci95_upper"],
+                }
+            diagnostics = {
+                "rhat": result.rhat,
+                "ess": result.ess,
+                "n_divergences": result.n_divergences,
+                "n_samples": result.n_samples,
+                "converged": result.converged,
+            }
+            # Safety Layer 4: confidence check
+            for param_name, ci in confidence.items():
+                alerts.extend(validate_confidence(
+                    ci["ci95_lower"], ci["ci95_upper"], param_name,
+                ))
+
+        elif method == "adaptive":
+            from bayesian.engine import adaptive_pipeline
+            pipeline_result = adaptive_pipeline(
+                model, tv, dose_events, observations,
+                run_layer2=True,
+                run_layer3=False,
+            )
+            ind_params = pipeline_result.final_params
+            eta = pipeline_result.final_eta
+            if pipeline_result.final_confidence:
+                confidence = pipeline_result.final_confidence
+                for param_name, ci in confidence.items():
+                    alerts.extend(validate_confidence(
+                        ci["ci95_lower"], ci["ci95_upper"], param_name,
+                    ))
+            diagnostics = {
+                "layers_executed": pipeline_result.layers_executed,
+                "pipeline": pipeline_result.diagnostics,
+            }
+
         else:
             raise HTTPException(
                 status_code=400, detail=f"Unknown method: {method}",

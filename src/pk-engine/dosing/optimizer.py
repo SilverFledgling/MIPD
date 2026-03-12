@@ -308,3 +308,131 @@ def monte_carlo_pta(
             on_target_count += 1
 
     return on_target_count / n_simulations
+
+
+# ──────────────────────────────────────────────────────────────────
+# Default MIC distributions (EUCAST/CLSI)
+# ──────────────────────────────────────────────────────────────────
+
+# MRSA vancomycin MIC distribution (EUCAST 2023 approximation)
+# Keys: MIC value (mg/L), Values: fraction of isolates
+MRSA_MIC_DISTRIBUTION: dict[float, float] = {
+    0.25: 0.01,
+    0.5:  0.15,
+    1.0:  0.65,
+    2.0:  0.18,
+    4.0:  0.01,
+}
+
+
+@dataclass
+class CFRResult:
+    """
+    Result of Cumulative Fraction of Response calculation.
+
+    Attributes:
+        cfr:                Cumulative Fraction of Response (0-1)
+        pta_by_mic:         PTA for each MIC value
+        mic_distribution:   MIC distribution used
+        dose_mg:            Dose evaluated
+        interval_h:         Interval evaluated
+    """
+    cfr: float
+    pta_by_mic: dict[float, float]
+    mic_distribution: dict[float, float]
+    dose_mg: float
+    interval_h: float
+
+
+# ──────────────────────────────────────────────────────────────────
+# CFR – Cumulative Fraction of Response
+# ──────────────────────────────────────────────────────────────────
+
+def compute_cfr(
+    tv_params: PKParams,
+    model: PopPKModel,
+    dose_mg: float,
+    interval_h: float,
+    mic_distribution: dict[float, float] | None = None,
+    target: PKPDTarget | None = None,
+    n_simulations: int = 1000,
+    infusion_h: float = DEFAULT_INFUSION_DURATION_H,
+    seed: int | None = None,
+) -> CFRResult:
+    """
+    Cumulative Fraction of Response (CFR).
+
+    Formula (math_ref §6.3 step 5):
+        CFR = Σ_MIC PTA(MIC) × F(MIC)
+
+    Where:
+        PTA(MIC) = probability of target attainment at given MIC
+        F(MIC)   = fraction of isolates with that MIC value
+
+    Args:
+        tv_params:          Typical PK values
+        model:              PopPK model
+        dose_mg:            Dose to evaluate (mg)
+        interval_h:         Dosing interval (hours)
+        mic_distribution:   Dict of {MIC_value: frequency}.
+                            If None, uses MRSA default (EUCAST).
+        target:             PK/PD target (default: AUC24/MIC 400-600)
+        n_simulations:      Monte Carlo samples per MIC value
+        infusion_h:         Infusion duration (hours)
+        seed:               Random seed
+
+    Returns:
+        CFRResult with overall CFR and per-MIC PTA breakdown
+    """
+    if mic_distribution is None:
+        mic_distribution = MRSA_MIC_DISTRIBUTION
+
+    if target is None:
+        target = PKPDTarget()
+
+    # Validate distribution sums to ~1.0
+    total_freq = sum(mic_distribution.values())
+    if abs(total_freq - 1.0) > 0.05:
+        # Normalize
+        mic_distribution = {
+            mic: freq / total_freq
+            for mic, freq in mic_distribution.items()
+        }
+
+    pta_by_mic: dict[float, float] = {}
+    cfr = 0.0
+
+    rng_base = np.random.default_rng(seed)
+
+    for mic_val, freq in mic_distribution.items():
+        # Create target with this specific MIC
+        mic_target = PKPDTarget(
+            auc24_min=target.auc24_min,
+            auc24_max=target.auc24_max,
+            trough_max=target.trough_max,
+            mic=mic_val,
+        )
+
+        # Compute PTA for this MIC value
+        mic_seed = int(rng_base.integers(0, 2**31))
+        pta = monte_carlo_pta(
+            tv_params=tv_params,
+            model=model,
+            dose_mg=dose_mg,
+            interval_h=interval_h,
+            target=mic_target,
+            n_simulations=n_simulations,
+            infusion_h=infusion_h,
+            seed=mic_seed,
+        )
+
+        pta_by_mic[mic_val] = pta
+        cfr += pta * freq
+
+    return CFRResult(
+        cfr=cfr,
+        pta_by_mic=pta_by_mic,
+        mic_distribution=mic_distribution,
+        dose_mg=dose_mg,
+        interval_h=interval_h,
+    )

@@ -40,9 +40,11 @@ class ModelTypeEnum(str, Enum):
 class InferenceMethodEnum(str, Enum):
     MAP = "map"
     LAPLACE = "laplace"
+    MCMC = "mcmc"
     ADVI = "advi"
     EP = "ep"
     SMC = "smc"
+    ADAPTIVE = "adaptive"
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -281,4 +283,33 @@ class ValidationMetricsResponse(BaseModel):
     rmse: float
     ccc: float
     bland_altman: dict[str, float]
+    safety: SafetyReportSchema
+
+
+# ──────────────────────────────────────────────────────────────────
+# CFR (Cumulative Fraction of Response)
+# ──────────────────────────────────────────────────────────────────
+
+class CFRRequest(BaseModel):
+    """Request: compute Cumulative Fraction of Response."""
+    patient: PatientSchema
+    drug: str = Field(default="vancomycin_vn")
+    dose_mg: float = Field(..., ge=100, le=5000, description="Dose in mg")
+    interval_h: float = Field(..., ge=4, le=72, description="Interval in hours")
+    mic_distribution: dict[float, float] | None = Field(
+        default=None,
+        description="MIC distribution {MIC_value: frequency}. "
+                    "If null, uses default MRSA EUCAST distribution.",
+    )
+    n_simulations: int = Field(default=1000, ge=100, le=10000)
+
+
+class CFRResponse(BaseModel):
+    """Response: CFR calculation result."""
+    cfr: float = Field(description="Cumulative Fraction of Response (0-1)")
+    cfr_percent: float = Field(description="CFR as percentage")
+    pta_by_mic: dict[str, float] = Field(description="PTA for each MIC")
+    mic_distribution: dict[str, float] = Field(description="MIC distribution used")
+    dose_mg: float
+    interval_h: float
     safety: SafetyReportSchema

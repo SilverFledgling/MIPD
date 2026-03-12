@@ -150,7 +150,11 @@ def run_ep(
 
             # Moment matching via sigma-point approximation
             # Sample around cavity mean, weight by likelihood
-            L_cav = np.linalg.cholesky(cavity_cov + 1e-8 * np.eye(n_eta))
+            # Ensure cavity_cov is positive definite via eigenvalue clipping
+            eigvals, eigvecs = np.linalg.eigh(cavity_cov)
+            eigvals = np.maximum(eigvals, 1e-6)  # Clip negative eigenvalues
+            cavity_cov_pd = eigvecs @ np.diag(eigvals) @ eigvecs.T
+            L_cav = np.linalg.cholesky(cavity_cov_pd)
 
             # Sigma points (simplified unscented)
             sigma_points = [cavity_mu]

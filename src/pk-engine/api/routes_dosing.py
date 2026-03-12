@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 
 from api.schemas import (
     DosingRequest, DosingResponse,
+    CFRRequest, CFRResponse,
     SafetyReportSchema, SafetyAlertSchema,
 )
 from api.safety import (
@@ -18,7 +19,7 @@ from pk.models import Observation, ModelType
 from pk.population import get_model, compute_vancomycin_tv
 from pk.solver import predict_concentrations
 from bayesian.map_estimator import estimate_map
-from dosing.optimizer import optimize_dose, monte_carlo_pta, PKPDTarget, DoseEvent
+from dosing.optimizer import optimize_dose, monte_carlo_pta, compute_cfr, PKPDTarget, DoseEvent
 from pk.models import Route
 
 
@@ -132,6 +133,64 @@ def recommend_dose(req: DosingRequest) -> DosingResponse:
         predicted_auc=round(pred_auc, 1),
         predicted_trough=round(pred_trough, 2),
         pta_probability=round(pta * 100, 1),
+        safety=SafetyReportSchema(**{
+            "is_safe": safety.is_safe,
+            "risk_score": safety.risk_score,
+            "alerts": [SafetyAlertSchema(**a.__dict__) for a in safety.alerts],
+            "requires_review": safety.requires_review,
+            "recommendation": safety.recommendation,
+        }),
+    )
+
+
+@router.post(
+    "/cfr",
+    response_model=CFRResponse,
+    summary="Compute Cumulative Fraction of Response (CFR)",
+)
+def dosing_cfr(req: CFRRequest) -> CFRResponse:
+    """
+    Cumulative Fraction of Response (CFR).
+
+    CFR = Σ PTA(MIC) × F(MIC)
+
+    Accounts for the MIC distribution of the pathogen population
+    to compute the overall probability that a regimen will be effective.
+    """
+    alerts = []
+    patient = _to_patient_data(req.patient)
+    alerts.extend(validate_patient(patient))
+
+    model = get_model(req.drug)
+    try:
+        tv = compute_vancomycin_tv(patient)
+    except (ValueError, ZeroDivisionError) as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot compute PK parameters: {e}.",
+        )
+
+    try:
+        cfr_result = compute_cfr(
+            tv_params=tv,
+            model=model,
+            dose_mg=req.dose_mg,
+            interval_h=req.interval_h,
+            mic_distribution=req.mic_distribution,
+            n_simulations=req.n_simulations,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    safety = generate_safety_report(alerts)
+
+    return CFRResponse(
+        cfr=round(cfr_result.cfr, 4),
+        cfr_percent=round(cfr_result.cfr * 100, 1),
+        pta_by_mic={str(k): round(v, 4) for k, v in cfr_result.pta_by_mic.items()},
+        mic_distribution={str(k): v for k, v in cfr_result.mic_distribution.items()},
+        dose_mg=cfr_result.dose_mg,
+        interval_h=cfr_result.interval_h,
         safety=SafetyReportSchema(**{
             "is_safe": safety.is_safe,
             "risk_score": safety.risk_score,

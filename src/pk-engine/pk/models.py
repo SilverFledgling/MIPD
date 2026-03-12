@@ -29,6 +29,7 @@ class ModelType(str, Enum):
     TWO_COMP_IV = "2comp_iv"
     ONE_COMP_ORAL = "1comp_oral"
     TWO_COMP_ORAL = "2comp_oral"
+    ONE_COMP_PEDI_IV = "1comp_pedi_iv"
 
 
 class Gender(str, Enum):
@@ -202,6 +203,7 @@ class PatientData:
     albumin: Optional[float] = None
     is_icu: bool = False
     is_on_dialysis: bool = False
+    pma: Optional[float] = None  # Postmenstrual age (weeks), for pediatric models
 
 
 # ──────────────────────────────────────────────────────────────────
