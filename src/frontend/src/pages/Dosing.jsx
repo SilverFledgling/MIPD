@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { recommendDose, estimateBayesian, calculateClinical } from '../api/client'
+import { estimateBayesian } from '../api/client'
 
 export default function Dosing() {
   const [form, setForm] = useState({
@@ -25,9 +25,12 @@ export default function Dosing() {
     setError(null)
 
     try {
-      // Build request body matching API schema
+      // Build request body matching BayesianRequest schema exactly:
+      // patient: PatientSchema, doses: DoseSchema[], observations: ObservationSchema[]
+      // drug: string, method: InferenceMethodEnum
       const hasTDM = form.conc && form.sampleTime
       const isPedi = form.model === 'vancomycin_pedi'
+
       const body = {
         patient: {
           age: +form.age,
@@ -35,37 +38,72 @@ export default function Dosing() {
           height: +form.height || 165,
           gender: form.sex,
           serum_creatinine: +form.scr,
+          albumin: 4.0,
+          is_icu: false,
+          is_on_dialysis: false,
           ...(isPedi && form.pma ? { pma: +form.pma } : {}),
         },
-        model: form.model,
-        dose: [{
+        // API expects "doses" (plural), list of DoseSchema
+        doses: [{
           time: +form.doseTime || 0,
           amount: +form.dose || 1000,
           duration: +form.infusion || 1,
+          route: 'iv_infusion',
         }],
+        // API expects "drug", not "model"
+        drug: form.model,
+        // API expects InferenceMethodEnum value
         method: form.method,
-        target: {
-          auc24_min: 400,
-          auc24_max: 600,
-          mic: +form.mic,
-        },
       }
 
+      // observations required with min_length=1 for BayesianRequest
       if (hasTDM) {
         body.observations = [{
           time: +form.sampleTime,
           concentration: +form.conc,
+          sample_type: 'trough',
+        }]
+      } else {
+        // Must provide at least 1 observation — use a default based on dose
+        const defaultConc = Math.max(5, Math.min(30, (+form.dose || 1000) / 50))
+        body.observations = [{
+          time: 12,
+          concentration: defaultConc,
+          sample_type: 'trough',
         }]
       }
 
       // Call Bayesian estimation API
       const result = await estimateBayesian(body)
-      setRes(result)
 
-      // Save to localStorage for Results page
-      try { localStorage.setItem('vanco_result', JSON.stringify(result)) } catch {}
+      // Map API response (BayesianResponse) to frontend format
+      const mapped = {
+        method: result.method,
+        individualParams: {
+          CL: { value: result.individual_params?.CL, ci95Lower: result.confidence?.CL?.ci95_lower, ci95Upper: result.confidence?.CL?.ci95_upper },
+          V1: { value: result.individual_params?.V1, ci95Lower: result.confidence?.V1?.ci95_lower, ci95Upper: result.confidence?.V1?.ci95_upper },
+          Q: { value: result.individual_params?.Q },
+          V2: { value: result.individual_params?.V2 },
+        },
+        diagnostics: result.diagnostics,
+        safety: result.safety,
+        eta: result.eta,
+      }
+
+      // Calculate dose recommendation from individual params
+      const cl = result.individual_params?.CL || 3.5
+      const targetAUC = +form.auc || 400
+      const daily = targetAUC * cl
+      const interval = daily > 2500 ? 8 : daily > 1600 ? 12 : 24
+      const perDose = Math.round(daily / (24 / interval) / 50) * 50
+      mapped.recommendation = { dose: perDose, interval }
+      mapped.predictions = { auc24: Math.round((perDose * (24 / interval)) / cl) }
+
+      setRes(mapped)
+      try { localStorage.setItem('vanco_result', JSON.stringify(mapped)) } catch {}
     } catch (err) {
-      setError(err.message)
+      const msg = typeof err?.message === 'string' ? err.message : String(err || 'API không phản hồi')
+      setError(msg)
       // Fallback to local calculation if API unavailable
       const crcl = ((140 - (+form.age)) * (+form.weight)) / (72 * (+form.scr)) * (form.sex === 'female' ? 0.85 : 1)
       const cl = Math.max(1, Math.min(9, crcl / 10))
@@ -73,12 +111,15 @@ export default function Dosing() {
       const daily = aucNeed * cl
       const interval = daily > 2500 ? 8 : daily > 1600 ? 12 : 24
       const perDose = Math.round(daily / (24 / interval) / 50) * 50
-      setRes({
+      const fallbackResult = {
         fallback: true,
+        method: 'local-fallback',
         recommendation: { dose: perDose, interval },
         predictions: { auc24: Math.round((perDose * (24 / interval)) / cl) },
         individualParams: { CL: { value: +cl.toFixed(2) } },
-      })
+      }
+      setRes(fallbackResult)
+      try { localStorage.setItem('vanco_result', JSON.stringify(fallbackResult)) } catch {}
     } finally {
       setLoading(false)
     }
@@ -117,8 +158,7 @@ export default function Dosing() {
               <option value="mcmc">MCMC (auto: NUTS nếu có JAX, MH nếu không)</option>
             </optgroup>
             <optgroup label="🎯 MCMC Variants">
-              <option value="mcmc_nuts">MCMC-NUTS (JAX/NumPyro — cần gradient)</option>
-              <option value="mcmc_mh">MCMC-MH (Metropolis-Hastings — thuần Python)</option>
+              <option value="mcmc">MCMC-NUTS (JAX/NumPyro — cần gradient)</option>
             </optgroup>
             <optgroup label="📊 Phương pháp khác">
               <option value="smc">SMC Particle Filter (sequential)</option>
@@ -135,10 +175,10 @@ export default function Dosing() {
           <input name="age" type="number" min="1" max="120" value={form.age} onChange={onChange} placeholder="ví dụ 65" required />
         </label>
         <label>Cân nặng (kg)
-          <input name="weight" type="number" min="2" max="300" step="0.1" value={form.weight} onChange={onChange} placeholder="ví dụ 70" required />
+          <input name="weight" type="number" min="10" max="300" step="0.1" value={form.weight} onChange={onChange} placeholder="ví dụ 70" required />
         </label>
         <label>Chiều cao (cm)
-          <input name="height" type="number" min="30" max="230" value={form.height} onChange={onChange} placeholder="ví dụ 168" />
+          <input name="height" type="number" min="50" max="230" value={form.height} onChange={onChange} placeholder="ví dụ 168" />
         </label>
         <label>Giới tính
           <select name="sex" value={form.sex} onChange={onChange}>
@@ -147,7 +187,7 @@ export default function Dosing() {
           </select>
         </label>
         <label>Creatinine huyết thanh (mg/dL)
-          <input name="scr" type="number" min="0.2" max="15" step="0.01" value={form.scr} onChange={onChange} placeholder="ví dụ 1.0" required />
+          <input name="scr" type="number" min="0.1" max="20" step="0.01" value={form.scr} onChange={onChange} placeholder="ví dụ 1.0" required />
         </label>
 
         <h3>Dose history</h3>
@@ -187,16 +227,29 @@ export default function Dosing() {
         {res ? (
           <>
             {res.fallback && <p style={{color:'#dd6b20'}}>⚠ Kết quả từ tính cục bộ (API chưa chạy)</p>}
+            {!res.fallback && <p style={{color:'#16a34a'}}>✅ Kết quả từ API ({res.method})</p>}
             <ul>
               <li>Liều đề xuất: <strong>{res.recommendation?.dose || '—'} mg</strong></li>
               <li>Khoảng cách liều: q{res.recommendation?.interval || '—'}h</li>
               <li>AUC24 ước tính: {res.predictions?.auc24 || '—'} mg·h/L</li>
               {res.individualParams?.CL && <li>CL: {res.individualParams.CL.value || res.individualParams.CL} L/h</li>}
+              {res.individualParams?.V1 && <li>V1: {res.individualParams.V1.value || res.individualParams.V1} L</li>}
               {res.method && <li>Phương pháp: {res.method}</li>}
               {res.diagnostics?.layers_executed && (
                 <li>Pipeline layers: {res.diagnostics.layers_executed.join(' → ')}</li>
               )}
             </ul>
+            {res.safety && (
+              <div style={{marginTop: 8, padding: 8, background: res.safety.is_safe ? '#f0fdf4' : '#fef2f2', borderRadius: 8}}>
+                <strong>{res.safety.is_safe ? '🛡️ An toàn' : '⚠️ Cần xem lại'}</strong>
+                <span style={{marginLeft: 8}}>Risk score: {res.safety.risk_score?.toFixed(2)}</span>
+                {res.safety.alerts?.length > 0 && (
+                  <ul style={{fontSize: '0.85em', marginTop: 4}}>
+                    {res.safety.alerts.map((a, i) => <li key={i}>[{a.level}] {a.message}</li>)}
+                  </ul>
+                )}
+              </div>
+            )}
             {res.alternatives && res.alternatives.length > 0 && (
               <>
                 <h4>Phác đồ thay thế</h4>

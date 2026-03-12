@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react'
-import { ResponsiveContainer, ComposedChart, Area, Line, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ScatterChart, ReferenceLine, BarChart, Bar } from 'recharts'
+import { useMemo, useState, useRef } from 'react'
+import { ResponsiveContainer, ComposedChart, Area, Line, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ScatterChart, ReferenceLine, BarChart, Bar, Legend } from 'recharts'
 import { validateMetrics } from '../api/client'
 
 export default function Validation() {
@@ -15,6 +15,39 @@ export default function Validation() {
   const [apiMetrics, setApiMetrics] = useState(null)
   const [apiLoading, setApiLoading] = useState(false)
   const [apiError, setApiError] = useState(null)
+  const vpcFileRef = useRef(null)
+  const baFileRef = useRef(null)
+  const npdeFileRef = useRef(null)
+
+  // CSV parsing utility
+  function parseCSV(text, expectedCols) {
+    const lines = text.trim().split(/\r?\n/).filter(l => l.trim())
+    if (lines.length < 2) return []
+    const header = lines[0].split(',').map(h => h.trim())
+    return lines.slice(1).map(line => {
+      const vals = line.split(',').map(v => v.trim())
+      const row = {}
+      expectedCols.forEach((col, i) => {
+        const colIdx = header.findIndex(h => h.toLowerCase() === col.toLowerCase())
+        row[col] = colIdx >= 0 ? vals[colIdx] : (vals[i] || '')
+      })
+      return row
+    })
+  }
+
+  function handleCSVUpload(file, expectedCols, setQueue) {
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      const rows = parseCSV(e.target.result, expectedCols)
+      if (rows.length > 0) {
+        setQueue(rows)
+      } else {
+        alert('Không tìm thấy dữ liệu hợp lệ trong file CSV.')
+      }
+    }
+    reader.readAsText(file)
+  }
 
   function quantile(arr, q) {
     if (!arr.length) return 0
@@ -37,25 +70,20 @@ export default function Validation() {
     return times.map(t => {
       const rs = m.get(t)
       const preds = rs.map(r => +r.PRED)
-      return { t, lo: quantile(preds, 0.05), hi: quantile(preds, 0.95), med: quantile(preds, 0.5) }
+      const dvs = rs.map(r => +r.DV)
+      return { t, lo: quantile(preds, 0.05), hi: quantile(preds, 0.95), med: quantile(preds, 0.5), dvMed: quantile(dvs, 0.5) }
     })
   }
 
   const vpcBands = useMemo(() => groupByTime(vpcRows), [vpcRows])
   const vpcDvPoints = useMemo(() => vpcRows.map(r => ({ t: +r.TIME, dv: +r.DV })), [vpcRows])
 
-  function parseVpc() {
-    setVpcRows(vpcQueue)
-  }
-  function parseBa() {
-    setBaRows(baQueue.map(r => ({ Patient: r.Patient, Method1: +r.Method1, Method2: +r.Method2 })))
-  }
-  function parseNpde() {
-    setNpdeRows(npdeQueue.map(r => ({ ID: r.ID, TIME: +r.TIME, DV: +r.DV, PRED: +r.PRED, IPRED: +r.IPRED })))
-  }
+  function parseVpc() { setVpcRows(vpcQueue) }
+  function parseBa() { setBaRows(baQueue.map(r => ({ Patient: r.Patient, Method1: +r.Method1, Method2: +r.Method2 }))) }
+  function parseNpde() { setNpdeRows(npdeQueue.map(r => ({ ID: r.ID, TIME: +r.TIME, DV: +r.DV, PRED: +r.PRED, IPRED: +r.IPRED }))) }
 
   const baData = useMemo(() => {
-    const pts = baRows.map(r => ({ mean: (r.Method1 + r.Method2) / 2, diff: r.Method1 - r.Method2 }))
+    const pts = baRows.map(r => ({ mean: (r.Method1 + r.Method2) / 2, diff: r.Method1 - r.Method2, patient: r.Patient }))
     const meanDiff = pts.length ? pts.reduce((a, b) => a + b.diff, 0) / pts.length : 0
     const sd = pts.length ? Math.sqrt(pts.reduce((a, b) => a + Math.pow(b.diff - meanDiff, 2), 0) / pts.length) : 0
     return { pts, meanDiff, sd }
@@ -93,7 +121,7 @@ export default function Validation() {
     const c4 = -2.549732539343734, c5 = 4.374664141464968, c6 = 2.938163982698783
     const d1 = 0.007784695709041462, d2 = 0.3224671290700398, d3 = 2.445134137142996, d4 = 3.754408661907416
     const plow = 0.02425, phigh = 1 - plow
-    let q, r
+    let q
     if (p < plow) {
       q = Math.sqrt(-2 * Math.log(p))
       return (((((c1 * q + c2) * q + c3) * q + c4) * q + c5) * q + c6) /
@@ -105,7 +133,7 @@ export default function Validation() {
         ((((d1 * q + d2) * q + d3) * q + d4) * q + 1)
     }
     q = p - 0.5
-    r = q * q
+    const r = q * q
     return (((((a1 * r + a2) * r + a3) * r + a4) * r + a5) * r + a6) * q /
       (((((b1 * r + b2) * r + b3) * r + b4) * r + b5) * r + 1)
   }
@@ -126,20 +154,22 @@ export default function Validation() {
             setApiLoading(true)
             setApiError(null)
             try {
-              const estimated = vpcRows.length > 0
-                ? vpcRows.map(r => +r.PRED)
-                : baQueue.map(r => +r.Method1)
-              const trueValues = vpcRows.length > 0
+              // API expects: { observed: float[], predicted: float[] }
+              const observed = vpcRows.length > 0
                 ? vpcRows.map(r => +r.DV)
+                : baQueue.map(r => +r.Method1)
+              const predicted = vpcRows.length > 0
+                ? vpcRows.map(r => +r.PRED)
                 : baQueue.map(r => +r.Method2)
-              if (estimated.length === 0) {
+              if (observed.length === 0) {
                 setApiError('Chưa có dữ liệu. Hãy nhập VPC hoặc Bland-Altman trước.')
                 return
               }
-              const res = await validateMetrics({ estimated, true_values: trueValues })
+              const res = await validateMetrics({ observed, predicted })
               setApiMetrics(res)
             } catch (err) {
-              setApiError(err.message)
+              const msg = typeof err?.message === 'string' ? err.message : String(err || 'API không phản hồi')
+              setApiError(msg)
             } finally {
               setApiLoading(false)
             }
@@ -149,13 +179,13 @@ export default function Validation() {
         </button>
         {apiError && <p style={{color:'#e53e3e', marginTop:8}}>⚠ {apiError}</p>}
         {apiMetrics && (
-          <div style={{display:'grid', gridTemplateColumns:'repeat(5, 1fr)', gap:12, marginTop:12}}>
+          <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(120px, 1fr))', gap:12, marginTop:12}}>
             {[
               { label: 'MPE (%)', value: apiMetrics.mpe?.toFixed(2), ok: Math.abs(apiMetrics.mpe||0) < 15 },
               { label: 'MAPE (%)', value: apiMetrics.mape?.toFixed(2), ok: (apiMetrics.mape||100) < 20 },
+              { label: 'RMSE', value: apiMetrics.rmse?.toFixed(2), ok: true },
               { label: 'CCC', value: apiMetrics.ccc?.toFixed(3), ok: (apiMetrics.ccc||0) > 0.85 },
-              { label: 'NPDE p-value', value: apiMetrics.npde_pvalue?.toFixed(3), ok: (apiMetrics.npde_pvalue||0) > 0.05 },
-              { label: 'Coverage 95%', value: apiMetrics.coverage_95 != null ? `${(apiMetrics.coverage_95*100).toFixed(1)}%` : '—', ok: (apiMetrics.coverage_95||0) > 0.85 },
+              { label: 'BA Mean Diff', value: apiMetrics.bland_altman?.mean_diff?.toFixed(2), ok: true },
             ].map(m => (
               <div key={m.label} style={{padding:'12px', background: m.ok ? '#f0fdf4' : '#fef2f2', borderRadius:8, textAlign:'center'}}>
                 <div style={{fontSize:11, color:'#666'}}>{m.label}</div>
@@ -170,6 +200,11 @@ export default function Validation() {
       <div className="grid">
         <div className="card">
           <h2>VPC input</h2>
+          <div style={{display:'flex', gap:8, marginBottom: 8, alignItems:'center'}}>
+            <button className="btn" onClick={() => vpcFileRef.current?.click()}>📂 Upload CSV</button>
+            <input ref={vpcFileRef} type="file" accept=".csv" style={{display:'none'}} onChange={e => handleCSVUpload(e.target.files[0], ['ID','TIME','DV','PRED','DOSE','WT'], setVpcQueue)} />
+            <span style={{fontSize:'0.8em', color:'#666'}}>CSV: ID, TIME, DV, PRED, DOSE, WT</span>
+          </div>
           <div className="form" style={{ gridTemplateColumns: 'repeat(6, 1fr)' }}>
             <label>ID<input value={vpcForm.ID} onChange={e => setVpcForm(f => ({ ...f, ID: e.target.value }))} /></label>
             <label>TIME<input type="number" value={vpcForm.TIME} onChange={e => setVpcForm(f => ({ ...f, TIME: e.target.value }))} /></label>
@@ -182,8 +217,9 @@ export default function Validation() {
             <button className="btn" onClick={() => { setVpcQueue(q => [...q, { ...vpcForm }]); setVpcForm({ ID: '', TIME: '', DV: '', PRED: '', DOSE: '', WT: '' }) }}>Thêm dòng</button>
             <button className="btn" onClick={() => setVpcQueue([])}>Xoá tất cả</button>
             <button className="btn primary" onClick={parseVpc}>Parse</button>
+            <span style={{fontSize:'0.85em', color:'#666', alignSelf:'center'}}>{vpcQueue.length} dòng</span>
           </div>
-          <div style={{ overflowX: 'auto', marginTop: 8 }}>
+          <div style={{ overflowX: 'auto', marginTop: 8, maxHeight: 200, overflowY: 'auto' }}>
             <table className="table">
               <thead><tr><th>ID</th><th>TIME</th><th>DV</th><th>PRED</th><th>DOSE</th><th>WT</th><th></th></tr></thead>
               <tbody>
@@ -199,24 +235,38 @@ export default function Validation() {
         </div>
         <div className="card">
           <h3>VPC chart</h3>
-          <ResponsiveContainer width="100%" height={280}>
-            <ComposedChart data={vpcBands}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="t" />
-              <YAxis />
-              <Tooltip />
-              <Area type="monotone" dataKey="hi" stroke="#cbd5e1" fill="#e2e8f0" />
-              <Area type="monotone" dataKey="lo" stroke="#cbd5e1" fill="#e2e8f0" />
-              <Line type="monotone" dataKey="med" stroke="#0ea5e9" strokeWidth={2} dot={false} />
-              <Scatter data={vpcDvPoints} fill="#ef4444" />
-            </ComposedChart>
-          </ResponsiveContainer>
+          {vpcRows.length === 0 ? (
+            <p style={{color:'#999', fontStyle:'italic'}}>Nhập dữ liệu và nhấn Parse để vẽ biểu đồ VPC</p>
+          ) : (
+            <ResponsiveContainer width="100%" height={280}>
+              <ComposedChart data={vpcBands}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="t" label={{ value: 'Time (h)', position: 'insideBottomRight', offset: -4 }} />
+                <YAxis label={{ value: 'mg/L', angle: -90, position: 'insideLeft' }} />
+                <Tooltip />
+                <Legend payload={[
+                  { value: '5th-95th Percentile', type: 'rect', color: '#e2e8f0' },
+                  { value: 'Median PRED', type: 'line', color: '#0ea5e9' },
+                  { value: 'Observed (DV)', type: 'circle', color: '#ef4444' },
+                ]} />
+                <Area type="monotone" dataKey="hi" stroke="#cbd5e1" fill="#e2e8f0" name="P95" legendType="none" />
+                <Area type="monotone" dataKey="lo" stroke="#cbd5e1" fill="#ffffff" name="P5" legendType="none" />
+                <Line type="monotone" dataKey="med" stroke="#0ea5e9" strokeWidth={2} dot={false} name="Median" legendType="none" />
+                <Scatter data={vpcDvPoints} dataKey="dv" fill="#ef4444" name="DV" legendType="none" />
+              </ComposedChart>
+            </ResponsiveContainer>
+          )}
         </div>
       </div>
 
       <div className="grid">
         <div className="card">
           <h2>Bland–Altman input</h2>
+          <div style={{display:'flex', gap:8, marginBottom: 8, alignItems:'center'}}>
+            <button className="btn" onClick={() => baFileRef.current?.click()}>📂 Upload CSV</button>
+            <input ref={baFileRef} type="file" accept=".csv" style={{display:'none'}} onChange={e => handleCSVUpload(e.target.files[0], ['Patient','Method1','Method2'], setBaQueue)} />
+            <span style={{fontSize:'0.8em', color:'#666'}}>CSV: Patient, Method1, Method2</span>
+          </div>
           <div className="form" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
             <label>Patient<input value={baForm.Patient} onChange={e => setBaForm(f => ({ ...f, Patient: e.target.value }))} /></label>
             <label>Method1<input type="number" value={baForm.Method1} onChange={e => setBaForm(f => ({ ...f, Method1: e.target.value }))} /></label>
@@ -226,8 +276,9 @@ export default function Validation() {
             <button className="btn" onClick={() => { setBaQueue(q => [...q, { ...baForm }]); setBaForm({ Patient: '', Method1: '', Method2: '' }) }}>Thêm dòng</button>
             <button className="btn" onClick={() => setBaQueue([])}>Xoá tất cả</button>
             <button className="btn primary" onClick={parseBa}>Parse</button>
+            <span style={{fontSize:'0.85em', color:'#666', alignSelf:'center'}}>{baQueue.length} dòng</span>
           </div>
-          <div style={{ overflowX: 'auto', marginTop: 8 }}>
+          <div style={{ overflowX: 'auto', marginTop: 8, maxHeight: 200, overflowY: 'auto' }}>
             <table className="table">
               <thead><tr><th>Patient</th><th>Method1</th><th>Method2</th><th></th></tr></thead>
               <tbody>
@@ -243,24 +294,38 @@ export default function Validation() {
         </div>
         <div className="card">
           <h3>Bland–Altman plot</h3>
-          <ResponsiveContainer width="100%" height={280}>
-            <ScatterChart>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="mean" />
-              <YAxis dataKey="diff" />
-              <Tooltip />
-              <Scatter data={baData.pts} fill="#0ea5e9" />
-              <ReferenceLine y={baData.meanDiff} stroke="#10b981" />
-              <ReferenceLine y={baData.meanDiff + 1.96 * baData.sd} stroke="#ef4444" strokeDasharray="4 4" />
-              <ReferenceLine y={baData.meanDiff - 1.96 * baData.sd} stroke="#ef4444" strokeDasharray="4 4" />
-            </ScatterChart>
-          </ResponsiveContainer>
+          {baRows.length === 0 ? (
+            <p style={{color:'#999', fontStyle:'italic'}}>Nhập dữ liệu và nhấn Parse để vẽ Bland-Altman plot</p>
+          ) : (
+            <ResponsiveContainer width="100%" height={280}>
+              <ScatterChart>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="mean" name="Mean" label={{ value: 'Mean of Methods', position: 'insideBottomRight', offset: -4 }} />
+                <YAxis dataKey="diff" name="Difference" label={{ value: 'Difference', angle: -90, position: 'insideLeft' }} />
+                <Tooltip cursor={{ strokeDasharray: '3 3' }} />
+                <Legend payload={[
+                  { value: 'Observations', type: 'circle', color: '#0ea5e9' },
+                  { value: 'Mean Diff', type: 'line', color: '#10b981' },
+                  { value: '±1.96 SD', type: 'line', color: '#ef4444' },
+                ]} />
+                <Scatter data={baData.pts} fill="#0ea5e9" name="Obs" legendType="none" />
+                <ReferenceLine y={baData.meanDiff} stroke="#10b981" strokeWidth={2} label={{ value: `Mean: ${baData.meanDiff.toFixed(1)}`, position: 'right' }} />
+                <ReferenceLine y={baData.meanDiff + 1.96 * baData.sd} stroke="#ef4444" strokeDasharray="4 4" label={{ value: '+1.96SD', position: 'right' }} />
+                <ReferenceLine y={baData.meanDiff - 1.96 * baData.sd} stroke="#ef4444" strokeDasharray="4 4" label={{ value: '-1.96SD', position: 'right' }} />
+              </ScatterChart>
+            </ResponsiveContainer>
+          )}
         </div>
       </div>
 
       <div className="grid">
         <div className="card">
           <h2>NPDE input</h2>
+          <div style={{display:'flex', gap:8, marginBottom: 8, alignItems:'center'}}>
+            <button className="btn" onClick={() => npdeFileRef.current?.click()}>📂 Upload CSV</button>
+            <input ref={npdeFileRef} type="file" accept=".csv" style={{display:'none'}} onChange={e => handleCSVUpload(e.target.files[0], ['ID','TIME','DV','PRED','IPRED'], setNpdeQueue)} />
+            <span style={{fontSize:'0.8em', color:'#666'}}>CSV: ID, TIME, DV, PRED, IPRED</span>
+          </div>
           <div className="form" style={{ gridTemplateColumns: 'repeat(5, 1fr)' }}>
             <label>ID<input value={npdeForm.ID} onChange={e => setNpdeForm(f => ({ ...f, ID: e.target.value }))} /></label>
             <label>TIME<input type="number" value={npdeForm.TIME} onChange={e => setNpdeForm(f => ({ ...f, TIME: e.target.value }))} /></label>
@@ -272,8 +337,9 @@ export default function Validation() {
             <button className="btn" onClick={() => { setNpdeQueue(q => [...q, { ...npdeForm }]); setNpdeForm({ ID: '', TIME: '', DV: '', PRED: '', IPRED: '' }) }}>Thêm dòng</button>
             <button className="btn" onClick={() => setNpdeQueue([])}>Xoá tất cả</button>
             <button className="btn primary" onClick={parseNpde}>Parse</button>
+            <span style={{fontSize:'0.85em', color:'#666', alignSelf:'center'}}>{npdeQueue.length} dòng</span>
           </div>
-          <div style={{ overflowX: 'auto', marginTop: 8 }}>
+          <div style={{ overflowX: 'auto', marginTop: 8, maxHeight: 200, overflowY: 'auto' }}>
             <table className="table">
               <thead><tr><th>ID</th><th>TIME</th><th>DV</th><th>PRED</th><th>IPRED</th><th></th></tr></thead>
               <tbody>
@@ -289,25 +355,32 @@ export default function Validation() {
         </div>
         <div className="card">
           <h3>NPDE histogram</h3>
-          <ResponsiveContainer width="100%" height={240}>
-            <BarChart data={npdeData.hist}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="bin" />
-              <YAxis />
-              <Tooltip />
-              <Bar dataKey="count" fill="#0ea5e9" />
-            </BarChart>
-          </ResponsiveContainer>
-          <h3>NPDE QQ plot</h3>
-          <ResponsiveContainer width="100%" height={240}>
-            <ScatterChart>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="theo" />
-              <YAxis dataKey="sample" />
-              <Tooltip />
-              <Scatter data={npdeData.qq} fill="#14b8a6" />
-            </ScatterChart>
-          </ResponsiveContainer>
+          {npdeRows.length === 0 ? (
+            <p style={{color:'#999', fontStyle:'italic'}}>Nhập dữ liệu NPDE và nhấn Parse để vẽ histogram</p>
+          ) : (
+            <>
+              <ResponsiveContainer width="100%" height={240}>
+                <BarChart data={npdeData.hist}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="bin" />
+                  <YAxis />
+                  <Tooltip />
+                  <Bar dataKey="count" fill="#0ea5e9" name="Frequency" />
+                </BarChart>
+              </ResponsiveContainer>
+              <h3>NPDE QQ plot</h3>
+              <ResponsiveContainer width="100%" height={240}>
+                <ScatterChart>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="theo" name="Theoretical" />
+                  <YAxis dataKey="sample" name="Sample" />
+                  <Tooltip />
+                  <ReferenceLine segment={[{ x: -3, y: -3 }, { x: 3, y: 3 }]} stroke="#999" strokeDasharray="4 4" />
+                  <Scatter data={npdeData.qq} fill="#14b8a6" name="QQ" />
+                </ScatterChart>
+              </ResponsiveContainer>
+            </>
+          )}
         </div>
       </div>
     </div>

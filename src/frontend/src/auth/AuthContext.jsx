@@ -10,8 +10,6 @@ import { createContext, useContext, useState, useEffect } from 'react';
 
 const AuthContext = createContext(null);
 
-const API_BASE = '/api';
-
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [token, setToken] = useState(localStorage.getItem('mipd_token'));
@@ -30,7 +28,7 @@ export function AuthProvider({ children }) {
   }, []);
 
   async function login(email, password) {
-    const res = await fetch(`${API_BASE}/auth/login`, {
+    const res = await fetch(`/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password }),
@@ -44,7 +42,7 @@ export function AuthProvider({ children }) {
   }
 
   async function register(email, password, fullName, role) {
-    const res = await fetch(`${API_BASE}/auth/register`, {
+    const res = await fetch(`/auth/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password, fullName, role }),
@@ -80,7 +78,7 @@ export function useAuth() {
 }
 
 async function fetchMe(token) {
-  const res = await fetch(`${API_BASE}/auth/me`, {
+  const res = await fetch(`/auth/me`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) throw new Error('Token invalid');

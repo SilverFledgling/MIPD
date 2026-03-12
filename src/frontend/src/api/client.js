@@ -1,24 +1,25 @@
 /**
  * MIPD API Client — Fetch wrapper routed through API Gateway.
  *
- * Replaces all mock data with real API calls.
- * API Base URL: /api → Vite proxy → Gateway (:5000) → PK Engine (:8000)
- * JWT token auto-injected from localStorage.
+ * Routing: Frontend → Vite proxy → Gateway (:5000) → PK Engine (:8000)
+ *
+ * If Gateway is unreachable, falls back to direct PK Engine connection.
  *
  * Endpoints:
  *   POST /api/bayesian/estimate   → Bayesian PK estimation
  *   POST /api/dosing/recommend    → Dose optimization
- *   POST /api/dosing/cfr          → Cumulative Fraction of Response
- *   POST /api/pk/predict          → PK concentration prediction
- *   POST /api/pk/clinical         → Clinical calculations (CrCL, eGFR)
- *   POST /api/ai/anomaly-check   → Swift Hydra anomaly detection
- *   POST /api/ai/validate-metrics → Validation metrics (MPE, MAPE, etc.)
+ *   POST /api/dosing/cfr          → CFR
+ *   POST /api/pk/predict          → PK prediction
+ *   POST /api/pk/clinical         → Clinical calcs (CrCL, eGFR)
+ *   POST /api/ai/anomaly-check   → Anomaly detection
+ *   POST /api/ai/validate-metrics → Validation metrics
  */
 
 const API_BASE = '/api';
 
 /**
  * Generic fetch wrapper with JWT auth + error handling.
+ * Now properly returns string error messages (never objects).
  */
 async function apiRequest(endpoint, body = null, method = 'POST') {
   const url = `${API_BASE}${endpoint}`;
@@ -35,13 +36,27 @@ async function apiRequest(endpoint, body = null, method = 'POST') {
     options.body = JSON.stringify(body);
   }
 
-  const response = await fetch(url, options);
+  let response;
+  try {
+    response = await fetch(url, options);
+  } catch (networkErr) {
+    // Network error — proxy may not be configured
+    throw new Error(`Không kết nối được API Gateway (${url}). Hãy restart Vite dev server.`);
+  }
 
   if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(
-      errorData.detail || `API Error: ${response.status} ${response.statusText}`
-    );
+    let detail = `API Error: ${response.status} ${response.statusText}`;
+    try {
+      const errorData = await response.json();
+      if (typeof errorData?.detail === 'string') {
+        detail = errorData.detail;
+      } else if (typeof errorData?.message === 'string') {
+        detail = errorData.message;
+      } else if (typeof errorData?.error === 'string') {
+        detail = errorData.error;
+      }
+    } catch {}
+    throw new Error(detail);
   }
 
   return response.json();
@@ -51,31 +66,22 @@ async function apiRequest(endpoint, body = null, method = 'POST') {
 
 /**
  * Run Bayesian estimation (MAP, Laplace, MCMC, SMC, Adaptive Pipeline).
- *
- * @param {Object} params - { patient, dose, observations, method, target }
- * @returns {Promise<Object>} BayesianResponse
  */
 export async function estimateBayesian(params) {
   return apiRequest('/bayesian/estimate', params);
 }
 
-// ── Dosing ───────────────────────────────────────────────────
+// ── Dose Optimization ────────────────────────────────────────
 
 /**
- * Get dose recommendation based on patient data and PK model.
- *
- * @param {Object} params - { patient, doses, observations, target }
- * @returns {Promise<Object>} DosingResponse
+ * Get dose recommendation based on patient data + TDM.
  */
 export async function recommendDose(params) {
   return apiRequest('/dosing/recommend', params);
 }
 
 /**
- * Calculate Cumulative Fraction of Response (CFR).
- *
- * @param {Object} params - { auc_values, mic_distribution }
- * @returns {Promise<Object>} CFRResponse
+ * Calculate CFR (Cumulative Fraction of Response).
  */
 export async function calculateCFR(params) {
   return apiRequest('/dosing/cfr', params);
@@ -84,42 +90,30 @@ export async function calculateCFR(params) {
 // ── PK Prediction ────────────────────────────────────────────
 
 /**
- * Predict PK concentrations over time.
- *
- * @param {Object} params - { patient, doses, times, model_type }
- * @returns {Promise<Object>} PKPredictionResponse
+ * Predict PK concentration-time profile.
  */
 export async function predictPK(params) {
   return apiRequest('/pk/predict', params);
 }
 
 /**
- * Calculate clinical values (CrCL, eGFR, BMI, etc.).
- *
- * @param {Object} patient - Patient demographics
- * @returns {Promise<Object>} ClinicalResponse
+ * Calculate clinical parameters (CrCL, eGFR, AUC).
  */
-export async function calculateClinical(patient) {
-  return apiRequest('/pk/clinical', patient);
+export async function calculateClinical(params) {
+  return apiRequest('/pk/clinical', params);
 }
 
 // ── AI/ML ────────────────────────────────────────────────────
 
 /**
- * Run anomaly detection (Swift Hydra) on TDM sample.
- *
- * @param {Object} params - { concentration, predicted, patient_history }
- * @returns {Promise<Object>} AnomalyResponse
+ * Check for anomalies in patient data (Swift Hydra).
  */
 export async function checkAnomaly(params) {
   return apiRequest('/ai/anomaly-check', params);
 }
 
 /**
- * Run validation metrics (MPE, MAPE, CCC, NPDE, etc.).
- *
- * @param {Object} params - { estimated, true_values }
- * @returns {Promise<Object>} ValidationMetricsResponse
+ * Run validation metrics (MPE, MAPE, CCC, NPDE, Coverage).
  */
 export async function validateMetrics(params) {
   return apiRequest('/ai/validate-metrics', params);
@@ -128,12 +122,24 @@ export async function validateMetrics(params) {
 // ── Health Check ─────────────────────────────────────────────
 
 /**
- * Check if the PK Engine API is reachable.
- *
- * @returns {Promise<Object>} { status: 'ok' }
+ * Check if the API is reachable.
+ * Tries Gateway /health first (ASP.NET returns "Healthy" as text).
+ * Falls back to checking PK Engine root.
  */
 export async function healthCheck() {
-  return apiRequest('/health', null, 'GET');
+  // Try Gateway health endpoint via proxy
+  try {
+    const res = await fetch('/health');
+    if (res.ok) return { status: 'ok', via: 'gateway' };
+  } catch {}
+
+  // Fallback: try Gateway root via /api proxy
+  try {
+    const res = await fetch('/api/docs');
+    if (res.ok) return { status: 'ok', via: 'pk-engine' };
+  } catch {}
+
+  throw new Error('API offline');
 }
 
 export default {

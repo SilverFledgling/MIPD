@@ -78,29 +78,34 @@ export default function Results() {
 
       {/* 3-Layer PK Curve Chart */}
       <h3>Đường cong Dược động học (3 lớp)</h3>
-      <p style={{fontSize:'0.85em', color:'#666'}}>
-        <span style={{color:'#94a3b8'}}>— —</span> Quần thể (Population) &nbsp;|&nbsp;
-        <span style={{color:'#2563eb'}}>━━</span> Cá thể (Individual) &nbsp;|&nbsp;
-        <span style={{color:'#bfdbfe'}}>░░</span> 95% Credible Interval
-      </p>
       <ResponsiveContainer width="100%" height={350}>
-        <AreaChart data={pkData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
+        <AreaChart data={pkData} margin={{ top: 10, right: 80, left: 0, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" />
           <XAxis dataKey="t" label={{ value: 'Giờ', position: 'insideBottomRight', offset: -4 }} />
           <YAxis label={{ value: 'mg/L', angle: -90, position: 'insideLeft' }} />
           <Tooltip />
+          <Legend
+            payload={[
+              { value: 'Quần thể (Population)', type: 'line', color: '#94a3b8' },
+              { value: 'Cá thể (Individual)', type: 'line', color: '#2563eb' },
+              { value: '95% Credible Interval', type: 'rect', color: '#bfdbfe' },
+              { value: 'Vùng đích (10-20 mg/L)', type: 'rect', color: '#22c55e' },
+            ]}
+          />
           {/* Target zone */}
           <ReferenceArea y1={10} y2={20} fill="#22c55e" fillOpacity={0.08}
-                         label={{ value: 'Vùng đích', position: 'right', fill: '#22c55e' }} />
+                         label={{ value: 'Vùng đích', position: 'insideTopRight', fill: '#22c55e', fontSize: 12 }} />
           {/* CI ribbon */}
-          <Area type="monotone" dataKey="ci_upper" stroke="none" fill="#bfdbfe" fillOpacity={0.5} />
-          <Area type="monotone" dataKey="ci_lower" stroke="none" fill="#ffffff" fillOpacity={1} />
+          <Area type="monotone" dataKey="ci_upper" stroke="none" fill="#bfdbfe" fillOpacity={0.5}
+                name="95% CI Upper" legendType="none" />
+          <Area type="monotone" dataKey="ci_lower" stroke="none" fill="#ffffff" fillOpacity={1}
+                name="95% CI Lower" legendType="none" />
           {/* Population line (dashed) */}
           <Line type="monotone" dataKey="population" stroke="#94a3b8" strokeWidth={1.5}
-                strokeDasharray="5 5" dot={false} name="Quần thể" />
+                strokeDasharray="5 5" dot={false} name="Quần thể" legendType="none" />
           {/* Individual line (solid) */}
           <Line type="monotone" dataKey="individual" stroke="#2563eb" strokeWidth={2.5}
-                dot={false} name="Cá thể" />
+                dot={false} name="Cá thể" legendType="none" />
         </AreaChart>
       </ResponsiveContainer>
 
