@@ -166,7 +166,8 @@ def estimate_map(
     # Initial eta = 0 (start from population values)
     eta0 = np.zeros(n_eta)
 
-    # Minimize MAP objective
+    # Minimize MAP objective with bounded eta to prevent extreme values
+    eta_bounds = [(-3.0, 3.0)] * n_eta  # exp(±3) ≈ 0.05–20× of TV
     result = minimize(
         fun=_map_objective,
         x0=eta0,
@@ -179,6 +180,7 @@ def estimate_map(
             model_type,
         ),
         method="L-BFGS-B",
+        bounds=eta_bounds,
         options={
             "maxiter": max_iterations,
             "ftol": 1e-8,
@@ -188,12 +190,28 @@ def estimate_map(
 
     eta_map = result.x
 
+    # Clip eta to safe range (extra safety)
+    eta_map = np.clip(eta_map, -3.0, 3.0)
+
     # Compute individual parameters
     ind_params = apply_iiv(tv_params, eta_map)
 
+    # Safety check: ensure positive PK params
+    if ind_params.CL <= 0 or ind_params.V1 <= 0:
+        ind_params = PKParams(
+            CL=max(ind_params.CL, 0.01),
+            V1=max(ind_params.V1, 0.1),
+            Q=max(ind_params.Q, 0.01),
+            V2=max(ind_params.V2, 0.1),
+        )
+
     # Compute residuals
     obs_times = [obs.time for obs in observations]
-    y_pred = predict_concentrations(ind_params, doses, obs_times, model_type)
+    try:
+        y_pred = predict_concentrations(ind_params, doses, obs_times, model_type)
+    except (ValueError, RuntimeError):
+        # Fallback: return population prediction as last resort
+        y_pred = predict_concentrations(tv_params, doses, obs_times, model_type)
     y_obs = np.array([obs.concentration for obs in observations])
     residuals = y_obs - y_pred
 
