@@ -259,7 +259,7 @@ python -m pytest tests/test_validation_ai.py -v   # AI + validation
 
 ## 📄 License
 
-MIT License — [Cần cập nhật]
+MIT License
 
 ## 🚀 Hướng dẫn Push lên GitHub
 
