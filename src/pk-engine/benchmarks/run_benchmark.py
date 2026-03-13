@@ -72,11 +72,13 @@ METHODS = [
     "adaptive_ind", "adaptive_cum",
 ]
 
-# TDM sampling times
-TDM_TIMES = [1.5, 12.0, 24.0]
-DOSE_AMOUNT = 1000.0          # mg per dose
+# TDM sampling times — relative to LAST dose (near steady state)
+# Peak: 1-2h after end of infusion, Trough: just before next dose [R4]
+TDM_PEAK_OFFSET = 1.5     # hours after last dose start
+TDM_TROUGH_OFFSET = -0.5  # hours before next dose (relative to interval)
+DOSE_AMOUNT = 1000.0          # mg per dose (used as fallback)
 INFUSION_DURATION = 1.0        # hour
-DAILY_DOSE = 2 * DOSE_AMOUNT  # 2000 mg/day (q12h regimen)
+DAILY_DOSE = 2 * DOSE_AMOUNT  # 2000 mg/day (legacy, for compatibility)
 
 # Vancomycin AUC/MIC target (IDSA/ASHP 2020 guideline)
 AUC_TARGET_LOW = 400.0   # mg·h/L
@@ -184,13 +186,15 @@ def generate_virtual_patients(n: int, rng: np.random.Generator) -> list[PatientS
     # ── Vietnamese Population Distributions (Gender-specific) ─────────
     # Reference: [R1] GSO Vietnam 2023, [R2] WHO WPR 2021, [R3] Hien 2021
 
-    # Gender ratio: 52% male in VN hospital ICU population [R6]
-    MALE_RATIO = 0.52
+    # Gender ratio: 55% male in VN hospital ICU population [R1, R6]
+    MALE_RATIO = 0.55
 
     # Age: Vietnamese hospital adult patients [R1, R6]
     # Truncated normal: mean 52 yr, SD 16 yr, range [18, 90]
-    AGE_MEAN_M, AGE_SD_M = 53.0, 16.0   # Male
-    AGE_MEAN_F, AGE_SD_F = 51.0, 15.0   # Female
+    # Female life expectancy 76yr > Male 71yr → female mean age higher [R1]
+    # SD = standard deviation (spread/dao động), NOT minimum age. Min clamped at 18
+    AGE_MEAN_M, AGE_SD_M = 52.0, 15.0   # Male:   mean 52 yr, SD 15 yr
+    AGE_MEAN_F, AGE_SD_F = 56.0, 16.0   # Female: mean 56 yr, SD 16 yr (cao hơn)
 
     # Weight (kg): Vietnamese adults [R2 WHO Vietnam NCD Profile 2021]
     WT_MEAN_M, WT_SD_M = 62.0, 10.0     # Male: 62 ± 10 kg
@@ -276,7 +280,7 @@ def generate_virtual_patients(n: int, rng: np.random.Generator) -> list[PatientS
             V2=np.clip(true_params.V2, 3.0, 200.0),   # [R5] 3-200 L
         )
 
-        # ── Step 4: Weight-based dosing [R4 IDSA/ASHP 2020] ──
+        # ── Step 4: Multi-dose regimen [R4 IDSA/ASHP 2020] ──
         # Single dose = 15 mg/kg, rounded to nearest 250 mg
         single_dose = round(DOSE_PER_KG * weight / 250.0) * 250.0
         single_dose = np.clip(single_dose, 500.0, 3000.0)  # Safety limits
@@ -289,20 +293,36 @@ def generate_virtual_patients(n: int, rng: np.random.Generator) -> list[PatientS
         )
         if crcl_val > 80:
             interval = 8.0   # q8h for normal/augmented renal function
+            n_doses = 6       # 48h of dosing → 6 doses
         elif crcl_val > 50:
             interval = 12.0  # q12h for moderate impairment
+            n_doses = 4       # 48h of dosing → 4 doses
         else:
             interval = 24.0  # q24h for severe impairment
+            n_doses = 3       # 72h of dosing → 3 doses
 
+        # Generate all dose events
         doses = [
-            DoseEvent(time=0.0, amount=single_dose, duration=INFUSION_DURATION),
-            DoseEvent(time=interval, amount=single_dose, duration=INFUSION_DURATION),
+            DoseEvent(
+                time=d * interval,
+                amount=single_dose,
+                duration=INFUSION_DURATION,
+            )
+            for d in range(n_doses)
         ]
 
-        # ── Step 5: Simulate true concentrations ──
+        # TDM times: drawn near steady state (after 3rd+ dose)
+        # Peak: 1.5h after last dose | Trough: just before next dose
+        last_dose_time = doses[-1].time
+        tdm_peak = last_dose_time + 1.5          # 1.5h post last dose
+        tdm_trough = last_dose_time + interval - 0.5  # 0.5h before next
+        tdm_mid = last_dose_time + interval / 2  # mid-interval
+        TDM_TIMES_PATIENT = [tdm_peak, tdm_mid, tdm_trough]
+
+        # ── Step 5: Simulate true concentrations at TDM times ──
         try:
             true_concs = predict_concentrations(
-                true_params, doses, TDM_TIMES, model.model_type,
+                true_params, doses, TDM_TIMES_PATIENT, model.model_type,
             )
             true_concs = [float(c) for c in true_concs]
         except Exception:
@@ -315,7 +335,7 @@ def generate_virtual_patients(n: int, rng: np.random.Generator) -> list[PatientS
         # ── Step 6: TDM observations with timing noise ──
         # Real TDM: drawn ±30 min from protocol time [clinical practice]
         n_tdm = rng.choice([1, 2], p=[0.4, 0.6])  # 60% get 2 samples
-        tdm_indices = sorted(rng.choice(len(TDM_TIMES), size=n_tdm, replace=False))
+        tdm_indices = sorted(rng.choice(len(TDM_TIMES_PATIENT), size=n_tdm, replace=False))
 
         observations = []
         true_at_tdm = []
@@ -329,7 +349,7 @@ def generate_virtual_patients(n: int, rng: np.random.Generator) -> list[PatientS
 
             # TDM timing noise: ±30 min from protocol
             t_noise = rng.normal(0, 0.25)  # SD = 15 min
-            t_actual = max(0.5, TDM_TIMES[idx] + t_noise)
+            t_actual = max(0.5, TDM_TIMES_PATIENT[idx] + t_noise)
 
             observations.append(
                 Observation(time=round(t_actual, 2), concentration=round(c_obs, 2))
@@ -619,7 +639,7 @@ def run_benchmark(n_patients: int = N_PATIENTS) -> list[BenchmarkResult]:
     print(f"  │ AUC24 range: {np.min(aucs):.0f} – {np.max(aucs):.0f} mg·h/L (mean {np.mean(aucs):.0f}, median {np.median(aucs):.0f}){'':>17s}│")
     print(f"  ├{'─'*88}┤")
     single_doses = np.array([p.doses[0].amount for p in patients])
-    intervals = np.array([p.doses[-1].time if len(p.doses) > 1 else 12.0 for p in patients])
+    intervals = np.array([p.doses[1].time - p.doses[0].time if len(p.doses) > 1 else 12.0 for p in patients])
     n_q8 = np.sum(intervals == 8.0)
     n_q12 = np.sum(intervals == 12.0)
     n_q24 = np.sum(intervals == 24.0)
