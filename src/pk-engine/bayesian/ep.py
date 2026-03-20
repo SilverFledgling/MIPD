@@ -204,14 +204,26 @@ def run_ep(
             new_site_prec = tilted_prec - cavity_prec
             new_site_nat_mean = tilted_prec @ tilted_mu - cavity_nat_mean
 
-            # Damping for stability
-            damping = 0.5
+            # Check positive-semidefiniteness of site precision
+            # If eigenvalues go negative, the EP update is unstable → skip
+            site_eigs = np.linalg.eigvalsh(new_site_prec)
+            if np.any(site_eigs < -1.0):
+                # Site precision too negative → skip this update
+                continue
+
+            # Damping for stability (higher damping = more conservative)
+            damping = 0.3  # Reduced from 0.5 for better stability
             new_site_prec = (
                 (1 - damping) * site_prec[j] + damping * new_site_prec
             )
             new_site_nat_mean = (
                 (1 - damping) * site_nat_mean[j] + damping * new_site_nat_mean
             )
+
+            # Check resulting site precision is not too extreme
+            max_prec_val = np.max(np.abs(new_site_prec))
+            if max_prec_val > 1e6 or np.any(np.isnan(new_site_prec)):
+                continue
 
             change = float(np.max(np.abs(new_site_prec - site_prec[j])))
             max_change = max(max_change, change)
@@ -230,12 +242,42 @@ def run_ep(
         post_prec += site_prec[j]
         post_nat_mean += site_nat_mean[j]
 
+    # Validate posterior precision is positive definite
     try:
-        post_cov = np.linalg.inv(post_prec)
+        post_prec_eigs = np.linalg.eigvalsh(post_prec)
+        if np.any(post_prec_eigs <= 0):
+            # Posterior precision not PD → EP failed, fallback to prior
+            post_cov = omega.copy()
+            post_mu = np.zeros(n_eta)
+            converged = False
+        else:
+            post_cov = np.linalg.inv(post_prec)
+            # Ensure positive definite
+            eigvals, eigvecs = np.linalg.eigh(post_cov)
+            eigvals = np.maximum(eigvals, 1e-8)
+            post_cov = eigvecs @ np.diag(eigvals) @ eigvecs.T
+            post_mu = post_cov @ post_nat_mean
     except np.linalg.LinAlgError:
         post_cov = omega.copy()
+        post_mu = np.zeros(n_eta)
+        converged = False
 
-    post_mu = post_cov @ post_nat_mean
+    # Clamp eta to prevent overflow — exp(eta) must stay physiological
+    # ±2.0 corresponds to ~7× or ~0.14× population value (safer than ±3.0)
+    post_mu = np.clip(post_mu, -2.0, 2.0)
+
+    # Sanity check: if CL or V1 would be extreme, fallback to zero eta
+    try:
+        test_params = apply_iiv(tv_params, post_mu)
+        if test_params.CL <= 0 or test_params.V1 <= 0 or test_params.CL > 50 or test_params.V1 > 500:
+            post_mu = np.zeros(n_eta)
+            post_cov = omega.copy()
+            converged = False
+    except (ValueError, OverflowError):
+        post_mu = np.zeros(n_eta)
+        post_cov = omega.copy()
+        converged = False
+
     params = apply_iiv(tv_params, post_mu)
 
     return EPResult(
@@ -245,3 +287,4 @@ def run_ep(
         n_iterations=n_iter,
         converged=converged,
     )
+

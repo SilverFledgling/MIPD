@@ -70,14 +70,17 @@ def _compute_hessian(
     observations: list[Observation],
     error_model: ErrorModel,
     model_type: ModelType,
-    epsilon: float = 1e-5,
+    epsilon: float = 1e-3,
 ) -> NDArray[np.float64]:
     """
-    Compute Hessian of MAP objective via finite differences.
+    Compute Hessian of MAP objective via central finite differences.
 
-    H_ij = d^2 J / d eta_i d eta_j
+    Uses direct second-order central difference formula:
+        H_ii = [f(x+h_i) - 2f(x) + f(x-h_i)] / h^2
+        H_ij = [f(x+h_i+h_j) - f(x+h_i-h_j) - f(x-h_i+h_j) + f(x-h_i-h_j)] / (4h^2)
 
-    Uses central differences for accuracy.
+    Epsilon=1e-3 (larger than typical 1e-5) for PK models where
+    the objective landscape is relatively smooth.
 
     Args:
         eta:       Current eta values (at MAP)
@@ -95,27 +98,37 @@ def _compute_hessian(
             error_model, model_type,
         )
 
+    f0 = obj(eta)
+
+    # Diagonal elements: d²f/dx_i²
     for i in range(n):
-        # Compute gradient at eta + epsilon_i and eta - epsilon_i
-        def grad_component(e: NDArray[np.float64], idx: int = i) -> float:
-            e_plus = e.copy()
-            e_minus = e.copy()
-            e_plus[idx] += epsilon
-            e_minus[idx] -= epsilon
-            return (obj(e_plus) - obj(e_minus)) / (2.0 * epsilon)
+        e_plus = eta.copy()
+        e_minus = eta.copy()
+        e_plus[i] += epsilon
+        e_minus[i] -= epsilon
+        hessian[i, i] = (obj(e_plus) - 2.0 * f0 + obj(e_minus)) / (epsilon ** 2)
 
-        for j in range(i, n):
-            eta_plus_j = eta.copy()
-            eta_minus_j = eta.copy()
-            eta_plus_j[j] += epsilon
-            eta_minus_j[j] -= epsilon
+    # Off-diagonal: d²f/(dx_i dx_j) via cross differences
+    for i in range(n):
+        for j in range(i + 1, n):
+            e_pp = eta.copy()  # +i, +j
+            e_pm = eta.copy()  # +i, -j
+            e_mp = eta.copy()  # -i, +j
+            e_mm = eta.copy()  # -i, -j
 
-            grad_plus = grad_component(eta_plus_j)
-            grad_minus = grad_component(eta_minus_j)
+            e_pp[i] += epsilon; e_pp[j] += epsilon
+            e_pm[i] += epsilon; e_pm[j] -= epsilon
+            e_mp[i] -= epsilon; e_mp[j] += epsilon
+            e_mm[i] -= epsilon; e_mm[j] -= epsilon
 
-            h_ij = (grad_plus - grad_minus) / (2.0 * epsilon)
+            h_ij = (obj(e_pp) - obj(e_pm) - obj(e_mp) + obj(e_mm)) / (4.0 * epsilon ** 2)
             hessian[i, j] = h_ij
-            hessian[j, i] = h_ij  # Symmetric
+            hessian[j, i] = h_ij
+
+    # Ensure Hessian is positive definite (it should be at MAP minimum)
+    eigvals, eigvecs = np.linalg.eigh(hessian)
+    eigvals = np.maximum(eigvals, 1e-4)  # Floor at small positive value
+    hessian = eigvecs @ np.diag(eigvals) @ eigvecs.T
 
     return hessian
 

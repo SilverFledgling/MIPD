@@ -42,23 +42,30 @@ VANCOMYCIN_VN = PopPKModel(
     drug="vancomycin",
     model_type=ModelType.TWO_COMP_IV,
     typical_values=PKParams(
-        CL=3.52,    # L/h
-        V1=30.0,    # L (central)
-        Q=5.02,     # L/h (inter-compartmental)
-        V2=40.0,    # L (peripheral)
+        CL=2.99,    # L/h  — Goti et al. (2018), Clin Pharmacokinet, 57(6):735-748
+        V1=30.4,    # L    — Goti 2018 (central volume)
+        Q=5.09,     # L/h  — Goti 2018 (inter-compartmental clearance)
+        V2=38.4,    # L    — Goti 2018 (peripheral volume)
     ),
     omega_matrix=[
-        [0.150, 0.000, 0.000, 0.000],   # omega^2 for CL
-        [0.000, 0.100, 0.000, 0.000],   # omega^2 for V1
-        [0.000, 0.000, 0.200, 0.000],   # omega^2 for Q
-        [0.000, 0.000, 0.000, 0.150],   # omega^2 for V2
+        # Goti 2018: ω²_CL=0.134, ω²_V1=0.0946 (estimated, RSE 3.6%, 6.5%)
+        # Q, V2 omega from Thomson et al. (2009) meta-analysis
+        # Off-diagonal: covariance(CL,V1)=0.02 (Goti 2018)
+        [0.134,  0.020,  0.000,  0.000],   # ω²_CL = 0.134 (CV≈37%)
+        [0.020,  0.0946, 0.000,  0.000],   # ω²_V1 = 0.0946 (CV≈31%)
+        [0.000,  0.000,  0.200,  0.000],   # ω²_Q  = 0.200 (Thomson 2009)
+        [0.000,  0.000,  0.000,  0.150],   # ω²_V2 = 0.150 (Thomson 2009)
     ],
     error_model=ErrorModel(
-        sigma_prop=0.10,     # 10% proportional
-        sigma_add=0.50,      # 0.5 mg/L additive
+        sigma_prop=0.138,    # 13.8% proportional — Goti 2018
+        sigma_add=1.62,      # 1.62 mg/L additive — Goti 2018
         model_type=ErrorModelType.COMBINED,
     ),
-    reference="Placeholder VN model (to be replaced with NC1 results)",
+    reference=(
+        "Goti et al. (2018), Clin Pharmacokinet, 57(6):735-748. "
+        "N≈500, externally validated. "
+        "Omega Q/V2: Thomson et al. (2009), J Clin Pharmacol, 49(10):1195."
+    ),
 )
 
 

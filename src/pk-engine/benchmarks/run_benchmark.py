@@ -39,6 +39,7 @@ from benchmark_plots import generate_all_plots
 from benchmark_export import (
     export_main_csv, export_rolling_ccc,
     export_individual_csv, export_npde_summary,
+    create_backup_dir, export_run_metadata, copy_plots_to_backup,
 )
 
 # Suppress ODE solver warnings for cleaner output
@@ -55,6 +56,7 @@ from pk.population import (
     apply_iiv,
 )
 from pk.solver import predict_concentrations
+from pk.analytical import predict_analytical
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -257,6 +259,34 @@ def generate_virtual_patients(n: int, rng: np.random.Generator) -> list[PatientS
         height = np.clip(height, 140.0, 195.0)
         scr = np.clip(scr, 0.3, 8.0)
 
+        # ── CKD-by-Age adjustment (Hien et al. 2021, Kidney Int Rep) ──
+        # Prevalence of CKD (eGFR < 60, Stage 3-5) by age in Vietnam:
+        #   18-39: ~1%  |  40-59: ~3%  |  60-79: ~8%  |  ≥80: ~15%
+        # Total CKD (any stage):
+        #   18-39: ~6%  |  40-59: ~13% |  60-79: ~26% |  ≥80: ~40%
+        # CKD raises SCr → adjust baseline SCr for CKD patients
+        if age < 40:
+            p_ckd_moderate = 0.01    # Stage 3-5 (SCr ~1.5-3.0)
+            p_ckd_severe   = 0.005   # Stage 4-5 (SCr ~3.0-6.0)
+        elif age < 60:
+            p_ckd_moderate = 0.03
+            p_ckd_severe   = 0.01
+        elif age < 80:
+            p_ckd_moderate = 0.08
+            p_ckd_severe   = 0.03
+        else:
+            p_ckd_moderate = 0.15
+            p_ckd_severe   = 0.06
+
+        ckd_roll = rng.random()
+        if ckd_roll < p_ckd_severe:
+            # CKD Stage 4-5: SCr 3.0–6.0 mg/dL
+            scr = rng.uniform(3.0, 6.0)
+        elif ckd_roll < p_ckd_moderate + p_ckd_severe:
+            # CKD Stage 3: SCr 1.5–3.0 mg/dL
+            scr = rng.uniform(1.5, 3.0)
+        # else: keep baseline SCr from copula (healthy or CKD Stage 1-2)
+
         patient_data = PatientData(
             age=age, weight=weight, height=height,
             gender=gender, serum_creatinine=scr,
@@ -321,7 +351,7 @@ def generate_virtual_patients(n: int, rng: np.random.Generator) -> list[PatientS
 
         # ── Step 5: Simulate true concentrations at TDM times ──
         try:
-            true_concs = predict_concentrations(
+            true_concs = predict_analytical(
                 true_params, doses, TDM_TIMES_PATIENT, model.model_type,
             )
             true_concs = [float(c) for c in true_concs]
@@ -566,9 +596,17 @@ def compute_all_metrics(results: list[PatientResult]) -> dict:
 # ══════════════════════════════════════════════════════════════════
 
 def run_benchmark(n_patients: int = N_PATIENTS) -> list[BenchmarkResult]:
+    from datetime import datetime as _dt
+
+    # ── Create timestamped backup directory (ms-precision) ──────────
+    out_dir = Path(__file__).resolve().parent
+    backup_dir, run_start_dt = create_backup_dir(out_dir)
+
     print("═" * 94)
     print(f"  MIPD Benchmark — {n_patients} Virtual Patients × {len(METHODS)} Methods")
     print(f"  Metrics: MPE·MAPE·RMSE·CCC · Bland-Altman · Coverage95% · TargetAttain · Shrinkage")
+    print(f"  Run started : {run_start_dt.strftime('%Y-%m-%d %H:%M:%S.') + f'{run_start_dt.microsecond // 1000:03d}'}")
+    print(f"  Backup folder: {backup_dir}")
     print("═" * 94)
 
     rng = np.random.default_rng(SEED)
@@ -709,6 +747,7 @@ def run_benchmark(n_patients: int = N_PATIENTS) -> list[BenchmarkResult]:
     # ── [3/4] Run estimation methods ──
     all_results: list[BenchmarkResult] = []
     patient_results_cache: dict[str, list[PatientResult]] = {}
+    methods_timing: dict[str, dict] = {}   # {method: {start, end, runtime_s}}
 
     print(f"\n[3/4] Running estimation methods...\n")
 
@@ -728,6 +767,7 @@ def run_benchmark(n_patients: int = N_PATIENTS) -> list[BenchmarkResult]:
                 pass
 
         t_start = time.time()
+        dt_start = _dt.now()   # wall-clock start (for metadata)
 
         for pi, p in enumerate(patients):
             # Progress indicator
@@ -754,6 +794,12 @@ def run_benchmark(n_patients: int = N_PATIENTS) -> list[BenchmarkResult]:
                     traceback.print_exc()
 
         t_elapsed = time.time() - t_start
+        dt_end = _dt.now()     # wall-clock end (for metadata)
+        methods_timing[method] = {
+            "start":     dt_start,
+            "end":       dt_end,
+            "runtime_s": t_elapsed,
+        }
         metrics = compute_all_metrics(patient_results)
 
         # Rolling CCC for adaptive_cum
@@ -1115,23 +1161,45 @@ def run_benchmark(n_patients: int = N_PATIENTS) -> list[BenchmarkResult]:
     # Save outputs (delegated to benchmark_export + benchmark_plots)
     # ══════════════════════════════════════════════════════════════
 
-    out_dir = Path(__file__).resolve().parent
+    # out_dir already defined at top of run_benchmark()
 
-    # Main CSV
-    export_main_csv(all_results, out_dir)
+    # Main CSV  — saved to live dir AND backup
+    export_main_csv(all_results, out_dir, backup_dir=backup_dir)
 
-    # Rolling CCC CSV (for adaptive_cum learning curve plot)
-    export_rolling_ccc(all_results, out_dir)
+    # Rolling CCC CSV  — live + backup
+    export_rolling_ccc(all_results, out_dir, backup_dir=backup_dir)
 
-    # Individual patient CSV (per thuyết minh CV 4.2)
-    export_individual_csv(patient_results_cache, out_dir)
+    # Individual patient CSV — live + backup
+    export_individual_csv(patient_results_cache, out_dir, backup_dir=backup_dir)
 
-    # Validation Plots (per thuyết minh CV 4.2)
+    # Validation Plots
     print(f"\n[5/5] Generating validation plots...")
     generate_all_plots(patient_results_cache, out_dir)
 
-    # NPDE Summary Statistics CSV
-    export_npde_summary(patient_results_cache, out_dir)
+    # NPDE Summary Statistics CSV — live + backup
+    export_npde_summary(patient_results_cache, out_dir, backup_dir=backup_dir)
+
+    # ── Record run-end time & write metadata ──────────────────────
+    run_end_dt = _dt.now()
+    save_ts = _dt.now()
+
+    export_run_metadata(
+        backup_dir,
+        run_start=run_start_dt,
+        run_end=run_end_dt,
+        n_patients=n_patients,
+        n_valid_patients=len(patients),
+        seed=SEED,
+        methods_timing=methods_timing,
+        all_results=all_results,
+        save_timestamp=save_ts,
+    )
+
+    # ── Copy plots into backup ─────────────────────────────────────
+    copy_plots_to_backup(out_dir, backup_dir)
+
+    print(f"\n✅ Backup complete: {backup_dir}")
+    print(f"   Run duration: {(run_end_dt - run_start_dt).total_seconds():.1f}s")
 
     return all_results
 

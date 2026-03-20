@@ -30,7 +30,7 @@ from numpy.typing import NDArray
 from pk.models import (
     DoseEvent, Observation, PKParams, ModelType, PopPKModel, ErrorModel,
 )
-from pk.solver import predict_concentrations
+from pk.analytical import predict_analytical
 from pk.population import apply_iiv
 
 
@@ -90,7 +90,7 @@ def _log_posterior(
 
     try:
         times = [obs.time for obs in observations]
-        c_pred_arr = predict_concentrations(
+        c_pred_arr = predict_analytical(
             ind_params, doses, times, model_type,
         )
     except Exception:
@@ -198,10 +198,37 @@ def run_mcmc_mh(
         n_accepted = 0
         total_iters = n_warmup + n_samples
 
+        # Adaptive proposal: start with initial scale, adapt during warmup
+        # Target acceptance rate ~23% (Roberts et al., 1997, optimal for RW-MH)
+        current_scale = proposal_scale
+        adapt_interval = 50  # Adapt every 50 iterations
+        warmup_accepts = 0
+        warmup_iters = 0
+
         for it in range(total_iters):
+            # Recompute proposal Cholesky with current scale
+            if it > 0 and it < n_warmup and it % adapt_interval == 0 and warmup_iters > 0:
+                current_rate = warmup_accepts / warmup_iters
+                # Adapt scale: increase if acceptance too high, decrease if too low
+                if current_rate > 0.30:
+                    current_scale *= 1.2  # Accept too often → larger steps
+                elif current_rate < 0.15:
+                    current_scale *= 0.8  # Accept too rarely → smaller steps
+                # Clamp scale to prevent extreme values
+                current_scale = np.clip(current_scale, 0.01, 1.0)
+                warmup_accepts = 0
+                warmup_iters = 0
+
+            # Compute proposal Cholesky with current scale
+            current_proposal_cov = current_scale ** 2 * omega
+            try:
+                current_proposal_chol = np.linalg.cholesky(current_proposal_cov)
+            except np.linalg.LinAlgError:
+                current_proposal_chol = proposal_chol  # fallback
+
             # Propose
             z = chain_rng.standard_normal(n_eta)
-            eta_proposed = eta_current + proposal_chol @ z
+            eta_proposed = eta_current + current_proposal_chol @ z
 
             lp_proposed = _log_posterior(
                 eta_proposed, tv_params, omega_inv,
@@ -215,6 +242,11 @@ def run_mcmc_mh(
                 lp_current = lp_proposed
                 if it >= n_warmup:
                     n_accepted += 1
+                else:
+                    warmup_accepts += 1
+
+            if it < n_warmup:
+                warmup_iters += 1
 
             # Record post-warmup
             if it >= n_warmup:
